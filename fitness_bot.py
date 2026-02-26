@@ -157,20 +157,25 @@ def call_claude(system_prompt, messages_content, max_tokens=2000, retries=3):
     """Call Claude with text or multimodal (image) content."""
     for attempt in range(retries):
         try:
+            print(f"🤖 Claude запрос (попытка {attempt+1}/{retries})...")
             response = claude.messages.create(
                 model="claude-haiku-4-5-20250929",
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": messages_content}]
             )
+            print(f"✅ Claude ответил! ({len(response.content[0].text)} символов)")
             return response.content[0].text
         except anthropic.APIStatusError as e:
+            print(f"❌ Claude API ошибка: {e.status_code} — {e.message}")
             if e.status_code == 529 and attempt < retries - 1:
-                time.sleep((attempt + 1) * 10)
+                wait = (attempt + 1) * 10
+                print(f"⏳ Жду {wait} сек перед повтором...")
+                time.sleep(wait)
                 continue
             return None
         except Exception as e:
-            print(f"Claude error: {e}")
+            print(f"❌ Claude исключение: {type(e).__name__}: {e}")
             return None
 
 # ============================================================
