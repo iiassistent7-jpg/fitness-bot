@@ -508,14 +508,29 @@ if __name__ == "__main__":
     print("💪 ФИЗРУК НА ПОСТУ!")
     print(f"📅 Israel time: {get_israel_now().strftime('%Y-%m-%d %H:%M')}")
 
-    # CRITICAL: Remove any webhook and drop pending updates to avoid 409 conflict
+    # Wait for old instance to fully stop (Railway zero-downtime deploy overlap)
+    print("⏳ Жду 15 сек чтобы старый процесс умер...")
+    time.sleep(15)
+
+    # Remove webhook and flush pending updates
     print("🔄 Сбрасываю webhook и старые updates...")
     bot.remove_webhook()
-    time.sleep(1)
-    try:
-        bot.get_updates(offset=-1, timeout=1)
-    except Exception:
-        pass
+    time.sleep(2)
+
+    # Retry getting updates until no 409
+    for attempt in range(10):
+        try:
+            bot.get_updates(offset=-1, timeout=1)
+            print("✅ Telegram API свободен!")
+            break
+        except Exception as e:
+            if "409" in str(e):
+                wait = (attempt + 1) * 5
+                print(f"⚠️ 409 conflict, жду {wait} сек (попытка {attempt+1}/10)...")
+                time.sleep(wait)
+            else:
+                print(f"⚠️ {e}")
+                break
 
     g = get_garmin()
     if g:
