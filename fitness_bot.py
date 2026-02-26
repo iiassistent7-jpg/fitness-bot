@@ -159,7 +159,7 @@ def call_claude(system_prompt, messages_content, max_tokens=2000, retries=3):
         try:
             print(f"🤖 Claude запрос (попытка {attempt+1}/{retries})...")
             response = claude.messages.create(
-                model="claude-haiku-4-5-20250929",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": messages_content}]
