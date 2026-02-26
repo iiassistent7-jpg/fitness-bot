@@ -52,7 +52,8 @@ def get_garmin():
 # HELPERS
 # ============================================================
 def get_israel_now():
-    return datetime.utcnow() + timedelta(hours=ISRAEL_UTC_OFFSET)
+    from datetime import timezone
+    return datetime.now(timezone.utc) + timedelta(hours=ISRAEL_UTC_OFFSET)
 
 def today_str():
     return get_israel_now().date().isoformat()
