@@ -508,6 +508,15 @@ if __name__ == "__main__":
     print("💪 ФИЗРУК НА ПОСТУ!")
     print(f"📅 Israel time: {get_israel_now().strftime('%Y-%m-%d %H:%M')}")
 
+    # CRITICAL: Remove any webhook and drop pending updates to avoid 409 conflict
+    print("🔄 Сбрасываю webhook и старые updates...")
+    bot.remove_webhook()
+    time.sleep(1)
+    try:
+        bot.get_updates(offset=-1, timeout=1)
+    except Exception:
+        pass
+
     g = get_garmin()
     if g:
         print("✅ Garmin подключён!")
@@ -518,4 +527,4 @@ if __name__ == "__main__":
     scheduler_thread.start()
     print("⏰ Расписание: 07:00 + каждые 3 часа до 22:00")
     print("📱 ПОЕХАЛИ!")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=30, long_polling_timeout=30)
