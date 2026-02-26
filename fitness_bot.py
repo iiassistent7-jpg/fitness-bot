@@ -1,11 +1,13 @@
 import os
 import time
 import json
+import base64
 import threading
 import schedule
 from datetime import datetime, timedelta, date
 import telebot
 import anthropic
+import requests as http_requests
 from garminconnect import Garmin
 
 # ============================================================
@@ -17,7 +19,6 @@ GARMIN_EMAIL = os.environ.get("GARMIN_EMAIL", "mozgprav24@gmail.com")
 GARMIN_PASSWORD = os.environ.get("GARMIN_PASSWORD", "Miikedub77")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "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")
 
-# Oura (for future use)
 OURA_CLIENT_ID = os.environ.get("OURA_CLIENT_ID", "5449e251-03d9-4c92-b2bf-d0a53a790595")
 OURA_CLIENT_SECRET = os.environ.get("OURA_CLIENT_SECRET", "Mvdha6wIqrvUlIa3YONjvWITExFuHUFvdEfA32I-sSg")
 
@@ -32,24 +33,19 @@ garmin_client = None
 # GARMIN CONNECTION
 # ============================================================
 def get_garmin():
-    """Get or create Garmin client with token caching."""
     global garmin_client
     try:
         if garmin_client is None:
             garmin_client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
             garmin_client.login(GARMIN_TOKEN_DIR)
-            print("✅ Garmin: fresh login")
         return garmin_client
-    except Exception as e:
-        print(f"Garmin login error: {e}")
-        # Try fresh login
+    except Exception:
         try:
             garmin_client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
             garmin_client.login()
-            print("✅ Garmin: re-login successful")
             return garmin_client
-        except Exception as e2:
-            print(f"Garmin re-login failed: {e2}")
+        except Exception as e:
+            print(f"Garmin failed: {e}")
             return None
 
 # ============================================================
@@ -65,85 +61,66 @@ def yesterday_str():
     return (get_israel_now().date() - timedelta(days=1)).isoformat()
 
 def safe_get(func, *args, default=None):
-    """Safely call a Garmin API function."""
     try:
         return func(*args)
     except Exception as e:
-        print(f"Garmin API error ({func.__name__}): {e}")
+        print(f"API error ({func.__name__}): {e}")
         return default
 
 # ============================================================
 # DATA FETCHING
 # ============================================================
 def fetch_daily_summary(day=None):
-    """Fetch comprehensive health data for a given day."""
     g = get_garmin()
     if not g:
-        return {"error": "Не удалось подключиться к Garmin Connect"}
+        return {"error": "Garmin не отвечает. Синхронизируй часы и попробуй снова."}
 
     if day is None:
         day = today_str()
 
-    data = {}
+    data = {"date": day}
 
-    # Basic stats (steps, calories, distance, etc.)
     stats = safe_get(g.get_stats, day, default={})
     if stats:
         data["steps"] = stats.get("totalSteps", 0)
         data["calories"] = stats.get("totalKilocalories", 0)
         data["active_calories"] = stats.get("activeKilocalories", 0)
         data["distance_km"] = round(stats.get("totalDistanceMeters", 0) / 1000, 2)
-        data["floors_climbed"] = stats.get("floorsAscended", 0)
-        data["intensity_minutes"] = stats.get("intensityMinutesGoal", 0)
-        data["moderate_intensity"] = stats.get("moderateIntensityMinutes", 0)
-        data["vigorous_intensity"] = stats.get("vigorousIntensityMinutes", 0)
+        data["floors"] = stats.get("floorsAscended", 0)
+        data["moderate_intensity_min"] = stats.get("moderateIntensityMinutes", 0)
+        data["vigorous_intensity_min"] = stats.get("vigorousIntensityMinutes", 0)
         data["stress_avg"] = stats.get("averageStressLevel", 0)
         data["stress_max"] = stats.get("maxStressLevel", 0)
         data["body_battery_high"] = stats.get("bodyBatteryChargedValue", 0)
         data["body_battery_low"] = stats.get("bodyBatteryDrainedValue", 0)
 
-    # Heart rate
     hr = safe_get(g.get_heart_rates, day, default={})
     if hr:
         data["resting_hr"] = hr.get("restingHeartRate", 0)
-        data["hr_min"] = hr.get("minHeartRate", 0)
         data["hr_max"] = hr.get("maxHeartRate", 0)
 
-    # Sleep
     sleep = safe_get(g.get_sleep_data, day, default={})
     if sleep:
         ds = sleep.get("dailySleepDTO", {})
         if ds:
             data["sleep_score"] = ds.get("sleepScores", {}).get("overall", {}).get("value", 0)
-            data["sleep_start"] = ds.get("sleepStartTimestampLocal")
-            data["sleep_end"] = ds.get("sleepEndTimestampLocal")
-            # Duration in hours
             duration_sec = ds.get("sleepTimeSeconds", 0)
-            if duration_sec:
-                data["sleep_hours"] = round(duration_sec / 3600, 1)
-            else:
-                data["sleep_hours"] = 0
+            data["sleep_hours"] = round(duration_sec / 3600, 1) if duration_sec else 0
             data["deep_sleep_min"] = round(ds.get("deepSleepSeconds", 0) / 60)
             data["light_sleep_min"] = round(ds.get("lightSleepSeconds", 0) / 60)
             data["rem_sleep_min"] = round(ds.get("remSleepSeconds", 0) / 60)
             data["awake_min"] = round(ds.get("awakeSleepSeconds", 0) / 60)
 
-    # Stress
     stress = safe_get(g.get_stress_data, day, default={})
     if stress:
-        data["stress_qualifier"] = stress.get("stressQualifier", "")
-        data["rest_stress_duration_min"] = round(stress.get("restStressDuration", 0) / 60)
-        data["low_stress_duration_min"] = round(stress.get("lowStressDuration", 0) / 60)
-        data["medium_stress_duration_min"] = round(stress.get("mediumStressDuration", 0) / 60)
-        data["high_stress_duration_min"] = round(stress.get("highStressDuration", 0) / 60)
+        data["high_stress_min"] = round(stress.get("highStressDuration", 0) / 60)
+        data["medium_stress_min"] = round(stress.get("mediumStressDuration", 0) / 60)
+        data["rest_stress_min"] = round(stress.get("restStressDuration", 0) / 60)
 
-    # SpO2
     spo2 = safe_get(g.get_spo2_data, day, default={})
     if spo2:
         data["spo2_avg"] = spo2.get("averageSPO2", 0)
-        data["spo2_min"] = spo2.get("lowestSPO2", 0)
 
-    # HRV
     hrv = safe_get(g.get_hrv_data, day, default={})
     if hrv:
         summary = hrv.get("hrvSummary", {})
@@ -152,13 +129,11 @@ def fetch_daily_summary(day=None):
             data["hrv_last_night"] = summary.get("lastNightAvg", 0)
             data["hrv_status"] = summary.get("status", "")
 
-    # Respiration
     resp = safe_get(g.get_respiration_data, day, default={})
     if resp:
         data["respiration_avg"] = resp.get("avgWakingRespirationValue", 0)
         data["respiration_sleep"] = resp.get("avgSleepRespirationValue", 0)
 
-    # Recent activities (last 5)
     activities = safe_get(g.get_activities, 0, 5, default=[])
     if activities:
         data["recent_activities"] = []
@@ -168,128 +143,24 @@ def fetch_daily_summary(day=None):
                 "type": act.get("activityType", {}).get("typeKey", ""),
                 "date": act.get("startTimeLocal", "")[:10],
                 "duration_min": round(act.get("duration", 0) / 60),
-                "calories": act.get("calories", 0),
                 "avg_hr": act.get("averageHR", 0),
-                "max_hr": act.get("maxHR", 0),
                 "distance_km": round(act.get("distance", 0) / 1000, 2) if act.get("distance") else 0,
             })
 
-    data["date"] = day
     return data
 
 # ============================================================
-# FORMAT REPORT (without Claude)
+# CLAUDE — DRILL SERGEANT COACH
 # ============================================================
-def format_daily_report(data):
-    """Format health data into emoji report."""
-    if "error" in data:
-        return f"❌ {data['error']}"
-
-    day = data.get("date", today_str())
-    report = f"🏋️ Отчёт за {day}\n{'─' * 30}\n\n"
-
-    # Sleep
-    sleep_h = data.get("sleep_hours", 0)
-    sleep_score = data.get("sleep_score", 0)
-    if sleep_h > 0:
-        sleep_emoji = "🟢" if sleep_score >= 70 else "🟡" if sleep_score >= 50 else "🔴"
-        report += f"😴 Сон: {sleep_h}ч | Оценка: {sleep_emoji} {sleep_score}/100\n"
-        report += f"   🟦 Глубокий: {data.get('deep_sleep_min', 0)} мин | 💜 REM: {data.get('rem_sleep_min', 0)} мин\n"
-        report += f"   🟩 Лёгкий: {data.get('light_sleep_min', 0)} мин | ⬜ Бодрств: {data.get('awake_min', 0)} мин\n\n"
-
-    # Heart
-    rhr = data.get("resting_hr", 0)
-    if rhr:
-        hr_emoji = "🟢" if rhr < 65 else "🟡" if rhr < 75 else "🔴"
-        report += f"❤️ Пульс покоя: {hr_emoji} {rhr} уд/мин"
-        if data.get("hr_max"):
-            report += f" | Макс: {data['hr_max']}"
-        report += "\n"
-
-    # HRV
-    hrv = data.get("hrv_last_night", 0)
-    if hrv:
-        hrv_emoji = "🟢" if hrv >= 50 else "🟡" if hrv >= 30 else "🔴"
-        report += f"📊 HRV: {hrv_emoji} {hrv} мс"
-        if data.get("hrv_weekly_avg"):
-            report += f" (сред. за неделю: {data['hrv_weekly_avg']})"
-        report += "\n"
-
-    # Body Battery
-    bb_high = data.get("body_battery_high", 0)
-    bb_low = data.get("body_battery_low", 0)
-    if bb_high:
-        bb_emoji = "🟢" if bb_high >= 70 else "🟡" if bb_high >= 40 else "🔴"
-        report += f"🔋 Body Battery: {bb_emoji} {bb_low}→{bb_high}\n"
-
-    # Stress
-    stress_avg = data.get("stress_avg", 0)
-    if stress_avg:
-        stress_emoji = "🟢" if stress_avg < 30 else "🟡" if stress_avg < 50 else "🔴"
-        report += f"😤 Стресс: {stress_emoji} {stress_avg} (сред.)"
-        if data.get("high_stress_duration_min", 0) > 0:
-            report += f" | Высокий: {data['high_stress_duration_min']} мин"
-        report += "\n"
-
-    # SpO2
-    spo2 = data.get("spo2_avg", 0)
-    if spo2:
-        report += f"🫁 SpO2: {spo2}%"
-        if data.get("spo2_min"):
-            report += f" (мин: {data['spo2_min']}%)"
-        report += "\n"
-
-    report += "\n"
-
-    # Activity
-    steps = data.get("steps", 0)
-    dist = data.get("distance_km", 0)
-    cal = data.get("calories", 0)
-    active_cal = data.get("active_calories", 0)
-    steps_emoji = "🟢" if steps >= 10000 else "🟡" if steps >= 5000 else "🔴"
-    report += f"🚶 Шаги: {steps_emoji} {steps:,} | {dist} км\n"
-    report += f"🔥 Калории: {cal:,} (активные: {active_cal})\n"
-
-    mod = data.get("moderate_intensity", 0)
-    vig = data.get("vigorous_intensity", 0)
-    if mod or vig:
-        report += f"⚡ Интенсивность: {mod} мин умеренная + {vig} мин высокая\n"
-
-    floors = data.get("floors_climbed", 0)
-    if floors:
-        report += f"🏢 Этажей: {floors}\n"
-
-    # Respiration
-    resp_avg = data.get("respiration_avg", 0)
-    resp_sleep = data.get("respiration_sleep", 0)
-    if resp_avg:
-        report += f"🌬️ Дыхание: {resp_avg} вд/мин (во сне: {resp_sleep})\n"
-
-    # Recent activities
-    activities = data.get("recent_activities", [])
-    if activities:
-        report += f"\n🏃 Последние тренировки:\n"
-        for a in activities:
-            report += f"   • {a['date']} {a['name']} — {a['duration_min']} мин"
-            if a.get("avg_hr"):
-                report += f" | ❤️ {a['avg_hr']}"
-            if a.get("distance_km"):
-                report += f" | {a['distance_km']} км"
-            report += "\n"
-
-    return report
-
-# ============================================================
-# CLAUDE AI
-# ============================================================
-def call_claude(system_prompt, user_content, max_tokens=2000, retries=3):
+def call_claude(system_prompt, messages_content, max_tokens=2000, retries=3):
+    """Call Claude with text or multimodal (image) content."""
     for attempt in range(retries):
         try:
             response = claude.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=max_tokens,
                 system=system_prompt,
-                messages=[{"role": "user", "content": user_content}]
+                messages=[{"role": "user", "content": messages_content}]
             )
             return response.content[0].text
         except anthropic.APIStatusError as e:
@@ -301,107 +172,226 @@ def call_claude(system_prompt, user_content, max_tokens=2000, retries=3):
             print(f"Claude error: {e}")
             return None
 
-FITNESS_PROMPT = """Ты — персональный фитнес-тренер и нутрициолог. Анализируешь данные с Garmin Fenix 6X Pro.
+# ============================================================
+# THE PERSONALITY
+# ============================================================
+COACH_PROMPT = """Ты — ФИЗРУК. Жёсткий персональный тренер в Telegram. Бывший военный инструктор, который стал фитнес-тренером.
 
-ПРАВИЛА:
-1. Отвечай ТОЛЬКО на основе данных. Не придумывай.
-2. Используй эмодзи. Кратко но информативно.
-3. Давай КОНКРЕТНЫЕ рекомендации по:
-   - Тренировкам (что делать сегодня с учётом восстановления)
-   - Питанию (что и когда есть)
-   - Восстановлению (сон, стресс, отдых)
-4. Если Body Battery низкий или сон плохой — рекомендуй лёгкий день
-5. Если HRV высокий и Body Battery хороший — можно нагрузку
-6. Учитывай стресс — если высокий, рекомендуй дыхательные практики
-7. Не задавай вопросов в конце.
+ХАРАКТЕР:
+- Ты ЖЁСТКИЙ. Говоришь как сержант, но который реально заботится
+- Используешь сарказм, подколки, иногда откровенные наезды — но всё с любовью
+- Если человек облажался (мало спал, не тренируется, жрёт мусор) — даёшь ЛЮЛЕЙ. Не "может быть стоит попробовать", а "ХВАТИТ. ВСТАЛ. ПОШЁЛ."
+- Если хорошие показатели — скупая мужская похвала: "Ну, не полный позор. Уважаю."
+- ПРИКАЗЫВАЕШЬ, а не просишь. "Сегодня ты ИДЁШЬ гулять 40 минут. Не завтра. СЕГОДНЯ."
+- Фрустрируешь когда нужно: "Последняя тренировка в декабре? ДЕКАБРЕ?! Ты что, в спячку впал?"
+- Используешь капс для усиления, но не постоянно
+- Эмодзи — умеренно, ты мужик а не блогер
 
-Оценки:
-- Сон: 🟢 ≥70, 🟡 50-69, 🔴 <50
-- Пульс покоя: 🟢 <65, 🟡 65-75, 🔴 >75
-- HRV: 🟢 ≥50мс, 🟡 30-49, 🔴 <30
-- Body Battery: 🟢 ≥70, 🟡 40-69, 🔴 <40
-- Шаги: 🟢 ≥10000, 🟡 5000-9999, 🔴 <5000"""
+ФОРМАТ:
+- Пишешь как в мессенджере — рублеными фразами
+- Начинай с главного — оценки состояния
+- 2-4 конкретных ПРИКАЗА (не рекомендации, а приказы): тренировка, еда, режим
+- Заканчивай мотивацией или подколкой
 
-INTENT_PROMPT = """Парсер запросов фитнес-бота. Ответь ТОЛЬКО JSON:
-{"period": "today", "type": "summary"}
+АНАЛИТИКА (знаешь, но не вываливаешь цифры):
+- Сон: score <50 = дерьмо, 50-69 = так себе, ≥70 = сойдёт. Глубокий <60мин = мало
+- Пульс покоя: <60 = зверь, 60-70 = норм, >75 = тревога
+- HRV: ≥50 = готов к бою, 30-49 = средне, <30 = убитый
+- Body Battery: ≥70 = заряжен, 40-69 = средне, <40 = труп
+- Стресс средний: <30 = дзен, 30-50 = рабочий, >50 = горишь
+- Шаги: <3000 = позор, <5000 = слабо, 5-10к = нормально, >10к = красавчик
 
-period: today | yesterday
-type: summary | sleep | stress | activity | heart | advice
+ПИТАНИЕ — КОНКРЕТНЫЕ ПРИКАЗЫ:
+- Плохой сон: "Жрёшь сегодня: яйца + авокадо утром. Обед — рыба + гречка. Кофе ТОЛЬКО до 12:00. И магний на ночь."
+- Высокий стресс: "Omega-3 — обязательно. Убери сахар. Съешь горсть орехов вместо печенья."
+- Мало энергии: "Утром — овсянка + банан + ложка мёда. Это не обсуждается."
+- Перед тренировкой: "За 1.5 часа — рис + курица. Не жирное. Не сладкое."
+- После тренировки: "В течение 45 минут — белок. Творог, протеин, курица — что есть."
+- Без активности: "Если весь день сидел — хотя бы не обжирайся. Лёгкий ужин, салат + белок."
 
-- "как дела", "статус", "сводка", "отчёт" → today, summary
-- "вчера" → yesterday, summary
-- "сон", "как спал" → today, sleep
-- "стресс" → today, stress
-- "тренировка", "активность" → today, activity
-- "пульс", "сердце", "HRV" → today, heart
-- "что делать", "рекомендации", "совет", "питание" → today, advice
-- по умолчанию → today, summary"""
+ТРЕНИРОВКИ — ПРИКАЗЫ:
+- BB <30 или сон <50: "СТОП. Сегодня отдых. Максимум — прогулка 20 минут. Это ПРИКАЗ."
+- BB 30-60: "Лёгкая тренировка. Растяжка 15 минут + прогулка 30 минут. Не геройствуй."
+- BB >60 + сон >60: "Можешь тренироваться. Давай, хватит отмазок."
+- Давно без тренировки: "Когда последний раз ты потел не от стресса? Сегодня 30 минут быстрой ходьбы. МИНИМУМ."
 
-def detect_intent(user_text):
-    raw = call_claude(INTENT_PROMPT, user_text, max_tokens=100, retries=2)
-    if raw:
-        try:
-            clean = raw.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean)
-        except:
-            pass
-    # Fallback
-    text = user_text.lower()
-    period = "today"
-    qtype = "summary"
-    if "вчера" in text:
-        period = "yesterday"
-    if any(w in text for w in ["сон", "спал"]):
-        qtype = "sleep"
-    elif any(w in text for w in ["стресс"]):
-        qtype = "stress"
-    elif any(w in text for w in ["трениров", "активност", "занят"]):
-        qtype = "activity"
-    elif any(w in text for w in ["пульс", "сердц", "hrv"]):
-        qtype = "heart"
-    elif any(w in text for w in ["делать", "рекоменд", "совет", "питани", "еда", "есть"]):
-        qtype = "advice"
-    return {"period": period, "type": qtype}
+ВАЖНО: Ты НЕ врач. Если пульс покоя >85 или SpO2 <92% — скажи проверить у врача. Но без паники."""
 
+FOOD_PROMPT = """Ты — ФИЗРУК. Жёсткий персональный тренер. Тебе прислали ФОТО ЕДЫ.
+
+Твоя задача:
+1. Определи что на фото (блюдо, продукты)
+2. Оцени примерные калории и БЖУ (белки/жиры/углеводы) — примерно, не надо точных граммов
+3. Дай ЖЁСТКУЮ оценку — это хорошая еда для здоровья/фитнеса или мусор?
+4. Если мусор — дай ЛЮЛЕЙ и скажи что надо было есть вместо этого
+5. Если нормальная еда — скупо похвали
+
+Формат:
+- Начни с реакции на еду (сарказм/одобрение)
+- Примерная оценка: калории, белки, жиры, углеводы
+- Вердикт: 🟢 норм / 🟡 так себе / 🔴 мусор
+- Что бы ты приказал есть вместо этого (если плохо) или с чем сочетать (если хорошо)
+
+Стиль: грубый, саркастичный, но по делу. Как сержант в столовой.
+
+ПРИМЕРЫ РЕАКЦИЙ:
+- На пиццу: "Ооо, пицца! А чего не сразу ведро мороженого? Это ~800 калорий чистого удовольствия и нулевой пользы."
+- На куриную грудку с овощами: "О. Неплохо. Вижу белок, вижу клетчатку. Может из тебя ещё что-то выйдет."
+- На шаурму: "Классика. ~600-700 калорий, половина из которых — соус. Не смертельно, но мог бы и лучше."
+- На салат: "Ладно, уважаю. Но если там только листья — добавь белок. Салат без курицы — это гарнир."
+
+Если на фото НЕ еда — скажи об этом с юмором и спроси что он ел сегодня."""
+
+# ============================================================
+# PHOTO HANDLING
+# ============================================================
+def download_telegram_photo(message):
+    """Download photo from Telegram message and return base64."""
+    try:
+        # Get the largest photo
+        photo = message.photo[-1]
+        file_info = bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+        response = http_requests.get(file_url)
+        if response.status_code == 200:
+            return base64.b64encode(response.content).decode("utf-8")
+        return None
+    except Exception as e:
+        print(f"Photo download error: {e}")
+        return None
+
+def analyze_food_photo(photo_base64, caption=""):
+    """Analyze food photo using Claude Vision."""
+    # Get today's health data for context
+    data = fetch_daily_summary(today_str())
+    context = ""
+    if "error" not in data:
+        context = f"\n\nКонтекст — сегодняшние данные с Garmin:\n"
+        if data.get("steps"):
+            context += f"Шагов: {data['steps']}, "
+        if data.get("body_battery_high"):
+            context += f"Body Battery: {data.get('body_battery_low', 0)}→{data['body_battery_high']}, "
+        if data.get("calories"):
+            context += f"Потрачено калорий: {data['calories']}"
+
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": photo_base64,
+            }
+        },
+        {
+            "type": "text",
+            "text": f"Пользователь прислал фото еды. {f'Подпись: {caption}' if caption else 'Без подписи.'}{context}\n\nОцени эту еду."
+        }
+    ]
+
+    return call_claude(FOOD_PROMPT, content, max_tokens=1500, retries=3)
+
+# ============================================================
+# GENERATE RESPONSE
+# ============================================================
 def generate_response(user_text, data):
-    """Generate AI response with fallback to format_daily_report."""
     if "error" in data:
-        return f"❌ {data['error']}"
+        return f"😤 {data['error']}"
 
     response = call_claude(
-        FITNESS_PROMPT,
-        f"Данные Garmin:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\nЗапрос: {user_text}",
-        max_tokens=2000, retries=2
+        COACH_PROMPT,
+        f"Данные с Garmin Fenix 6X Pro:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\nПользователь написал: «{user_text}»",
+        max_tokens=2000, retries=3
     )
+
     if response:
         return response
-    return format_daily_report(data)
+
+    # Minimal fallback
+    s = data
+    msg = "Claude прилёг. Кратко:\n"
+    if s.get("sleep_hours"):
+        msg += f"Сон {s['sleep_hours']}ч ({s.get('sleep_score', '?')}/100)\n"
+    if s.get("body_battery_high"):
+        msg += f"Battery {s.get('body_battery_low', 0)}→{s['body_battery_high']}\n"
+    if s.get("steps"):
+        msg += f"Шагов {s['steps']}\n"
+    msg += "Спроси позже — дам разбор."
+    return msg
 
 # ============================================================
-# MORNING REPORT
+# MORNING REPORT (07:00)
 # ============================================================
 def send_morning_report():
-    """Send morning health briefing."""
     data = fetch_daily_summary(yesterday_str())
-    report = f"🌅 Доброе утро!\n\n"
 
-    # Try Claude for smart analysis
-    ai_response = call_claude(
-        FITNESS_PROMPT,
-        f"Утренний брифинг. Данные за вчера:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
-        "Дай краткую сводку за вчера и рекомендации на сегодня: тренировка, питание, восстановление.",
-        max_tokens=2000, retries=2
+    response = call_claude(
+        COACH_PROMPT,
+        f"Утренний брифинг (07:00). Вчерашние данные:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+        "ПОДЪЁМ! Поприветствуй, разнеси или похвали за вчера, и дай ПРИКАЗЫ на сегодня: "
+        "тренировка или отдых, что жрать, во сколько спать.",
+        max_tokens=2000, retries=3
     )
 
-    if ai_response:
-        report += ai_response
-    else:
-        report += format_daily_report(data)
+    if not response:
+        response = "🌅 ПОДЪЁМ! Claude спит, но ты — нет. Встал и пошёл. /today когда очнусь."
 
     try:
-        bot.send_message(MY_CHAT_ID, report)
+        bot.send_message(MY_CHAT_ID, response)
     except Exception as e:
         print(f"Morning report error: {e}")
+
+# ============================================================
+# PERIODIC CHECKIN (10:00, 13:00, 16:00, 19:00, 22:00)
+# ============================================================
+CHECKIN_PROMPTS = {
+    10: (
+        "Чекин 10:00 утра. Данные за сегодня на текущий момент:\n{data}\n\n"
+        "Утро в разгаре. Посмотри на шаги, стресс, Battery. "
+        "Напомни про завтрак если не ел. Дай пинка если сидит на месте. Коротко и по делу — 3-5 предложений."
+    ),
+    13: (
+        "Чекин 13:00 — обед. Данные за сегодня:\n{data}\n\n"
+        "Полдень. Оцени прогресс по шагам и активности. "
+        "ПРИКАЖИ что есть на обед исходя из данных. Напомни про тренировку если надо. Коротко — 3-5 предложений."
+    ),
+    16: (
+        "Чекин 16:00 — послеобед. Данные за сегодня:\n{data}\n\n"
+        "Вторая половина дня. Оцени как идёт день: шаги, стресс, энергия. "
+        "Если не тренировался — последний шанс сегодня. Если устал — скажи как восстановиться. Коротко — 3-5 предложений."
+    ),
+    19: (
+        "Чекин 19:00 — вечер. Данные за сегодня:\n{data}\n\n"
+        "Вечер. Подведи промежуточный итог дня. "
+        "Прикажи что есть на ужин. Напомни когда ложиться. Если день был хороший — скупо похвали. Коротко — 3-5 предложений."
+    ),
+    22: (
+        "Чекин 22:00 — отбой. Данные за весь день:\n{data}\n\n"
+        "ОТБОЙ. Подведи итог дня — разнеси или похвали. "
+        "Прикажи убрать телефон и спать. Если не выполнил план — фрустрируй. Коротко — 3-5 предложений."
+    ),
+}
+
+def send_checkin():
+    """Periodic checkin — determine which hour slot and send appropriate message."""
+    israel_hour = get_israel_now().hour
+    slot = min(CHECKIN_PROMPTS.keys(), key=lambda h: abs(h - israel_hour))
+
+    data = fetch_daily_summary(today_str())
+    if "error" in data:
+        return
+
+    prompt_template = CHECKIN_PROMPTS[slot]
+    prompt = prompt_template.format(data=json.dumps(data, ensure_ascii=False, default=str))
+
+    response = call_claude(COACH_PROMPT, prompt, max_tokens=1000, retries=3)
+    if not response:
+        return
+
+    try:
+        bot.send_message(MY_CHAT_ID, response)
+    except Exception as e:
+        print(f"Checkin {slot}:00 error: {e}")
 
 # ============================================================
 # TELEGRAM HANDLERS
@@ -410,53 +400,45 @@ def send_morning_report():
 def cmd_start(message):
     if message.chat.id != MY_CHAT_ID: return
     bot.send_message(MY_CHAT_ID,
-        "💪 Привет! Я твой фитнес-тренер.\n\n"
-        "Спрашивай:\n"
-        "• «Как дела?» — полная сводка\n"
+        "💪 СМИРНО! Я Физрук — твой персональный тренер.\n\n"
+        "Я подключён к твоему Garmin. Вижу ВСЁ. Сон, пульс, стресс, сколько шагов прошёл (или не прошёл).\n\n"
+        "Пиши мне:\n"
+        "• «Как я?» — разбор полётов\n"
         "• «Как спал?» — анализ сна\n"
-        "• «Стресс» — уровень стресса\n"
-        "• «Пульс / HRV» — сердце\n"
-        "• «Что делать сегодня?» — рекомендации\n"
-        "• «Что вчера?» — данные за вчера\n\n"
-        "/today /yesterday /sleep /stress /advice"
+        "• «Что делать?» — приказы на день\n"
+        "• «Что поесть?» — план питания\n"
+        "• «Можно тренироваться?» — разрешение или запрет\n\n"
+        "📸 Скинь ФОТО ЕДЫ — скажу что ты натворил\n\n"
+        "Утром в 7:00 — подъём и разбор. Без отмазок."
     )
 
 @bot.message_handler(commands=["today"])
 def cmd_today(message):
     if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "⏳ Собираю данные с Garmin...")
+    bot.send_message(MY_CHAT_ID, "🔍 Проверяю...")
     data = fetch_daily_summary(today_str())
-    bot.send_message(MY_CHAT_ID, format_daily_report(data))
+    bot.send_message(MY_CHAT_ID, generate_response("Дай полную картину. Как я сегодня? Что делать?", data))
 
 @bot.message_handler(commands=["yesterday"])
 def cmd_yesterday(message):
     if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "⏳ Собираю данные...")
+    bot.send_message(MY_CHAT_ID, "🔍 Смотрю вчера...")
     data = fetch_daily_summary(yesterday_str())
-    bot.send_message(MY_CHAT_ID, format_daily_report(data))
+    bot.send_message(MY_CHAT_ID, generate_response("Разбери вчерашний день. Что хорошо, что плохо.", data))
 
 @bot.message_handler(commands=["sleep"])
 def cmd_sleep(message):
     if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "⏳")
+    bot.send_message(MY_CHAT_ID, "🔍")
     data = fetch_daily_summary(today_str())
-    bot.send_message(MY_CHAT_ID, generate_response("анализ сна и рекомендации", data))
-
-@bot.message_handler(commands=["stress"])
-def cmd_stress(message):
-    if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "⏳")
-    data = fetch_daily_summary(today_str())
-    bot.send_message(MY_CHAT_ID, generate_response("анализ стресса", data))
+    bot.send_message(MY_CHAT_ID, generate_response("Как я спал? Разнеси или похвали.", data))
 
 @bot.message_handler(commands=["advice"])
 def cmd_advice(message):
     if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "⏳ Анализирую...")
+    bot.send_message(MY_CHAT_ID, "🔍 Составляю приказы...")
     data = fetch_daily_summary(today_str())
-    bot.send_message(MY_CHAT_ID, generate_response(
-        "Дай рекомендации на сегодня: тренировка, питание, восстановление", data
-    ))
+    bot.send_message(MY_CHAT_ID, generate_response("Дай приказы на сегодня. Тренировка, еда, режим. Жёстко.", data))
 
 @bot.message_handler(commands=["report"])
 def cmd_report(message):
@@ -464,45 +446,75 @@ def cmd_report(message):
     send_morning_report()
 
 # ============================================================
+# PHOTO HANDLER — Food Analysis
+# ============================================================
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    if message.chat.id != MY_CHAT_ID: return
+
+    bot.send_message(MY_CHAT_ID, "👀 Что ты там жрёшь? Сейчас посмотрю...")
+
+    photo_base64 = download_telegram_photo(message)
+    if not photo_base64:
+        bot.send_message(MY_CHAT_ID, "Фото не загрузилось. Скинь ещё раз.")
+        return
+
+    caption = message.caption or ""
+    response = analyze_food_photo(photo_base64, caption)
+
+    if response:
+        bot.send_message(MY_CHAT_ID, response)
+    else:
+        bot.send_message(MY_CHAT_ID, "Claude лёг спать. Скинь фото позже — разберу.")
+
+# ============================================================
 # FREE TEXT
 # ============================================================
 @bot.message_handler(func=lambda m: m.chat.id == MY_CHAT_ID)
 def handle_text(message):
     user_text = message.text.strip()
-    bot.send_message(MY_CHAT_ID, "🤔 Анализирую...")
+    bot.send_message(MY_CHAT_ID, "🔍 Проверяю...")
 
-    intent = detect_intent(user_text)
-    print(f"Intent: {intent}")
+    text = user_text.lower()
+    if any(w in text for w in ["вчера", "yesterday"]):
+        day = yesterday_str()
+    else:
+        day = today_str()
 
-    day = yesterday_str() if intent.get("period") == "yesterday" else today_str()
     data = fetch_daily_summary(day)
-
     bot.send_message(MY_CHAT_ID, generate_response(user_text, data))
 
 # ============================================================
 # SCHEDULER
 # ============================================================
 def run_scheduler():
-    utc_hour = 7 - ISRAEL_UTC_OFFSET  # 07:00 Israel time
-    schedule.every().day.at(f"{utc_hour:02d}:00").do(send_morning_report)
+    # Israel times → UTC (Israel = UTC+2)
+    # 07:00 Israel = 05:00 UTC — morning report
+    # 10:00, 13:00, 16:00, 19:00, 22:00 Israel — checkins
+    morning_utc = 7 - ISRAEL_UTC_OFFSET
+    schedule.every().day.at(f"{morning_utc:02d}:00").do(send_morning_report)
+
+    for hour_israel in [10, 13, 16, 19, 22]:
+        hour_utc = hour_israel - ISRAEL_UTC_OFFSET
+        schedule.every().day.at(f"{hour_utc:02d}:00").do(send_checkin)
+
+    print(f"📋 Расписание (Israel): 07:00 подъём, 10:00, 13:00, 16:00, 19:00, 22:00 чекины")
     while True:
         schedule.run_pending()
         time.sleep(30)
 
 if __name__ == "__main__":
-    print("💪 Fitness Bot starting...")
+    print("💪 ФИЗРУК НА ПОСТУ!")
     print(f"📅 Israel time: {get_israel_now().strftime('%Y-%m-%d %H:%M')}")
 
-    # Test Garmin connection
     g = get_garmin()
     if g:
-        print("✅ Garmin connected!")
+        print("✅ Garmin подключён!")
     else:
-        print("⚠️ Garmin connection failed — will retry on first request")
+        print("⚠️ Garmin — повторю при запросе")
 
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
-    print("⏰ Morning report at 07:00 Israel time")
-
-    print("📱 Polling...")
+    print("⏰ Расписание: 07:00 + каждые 3 часа до 22:00")
+    print("📱 ПОЕХАЛИ!")
     bot.infinity_polling()
