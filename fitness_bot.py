@@ -2,6 +2,7 @@ import os
 import time
 import json
 import base64
+import tempfile
 import threading
 import schedule
 from datetime import datetime, timedelta, date
@@ -14,23 +15,21 @@ from openai import OpenAI
 # ============================================================
 # CONFIGURATION
 # ============================================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8759040105:AAHrTnS1uC2D8XEwxtqPYsUJl1NbHfvlH-4")
-MY_CHAT_ID = int(os.environ.get("MY_CHAT_ID", "320613087"))
-GARMIN_EMAIL = os.environ.get("GARMIN_EMAIL", "mozgprav24@gmail.com")
-GARMIN_PASSWORD = os.environ.get("GARMIN_PASSWORD", "Miikedub77")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+MY_CHAT_ID = int(os.environ.get("MY_CHAT_ID", "0"))
+GARMIN_EMAIL = os.environ.get("GARMIN_EMAIL", "")
+GARMIN_PASSWORD = os.environ.get("GARMIN_PASSWORD", "")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "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")
-
-OURA_CLIENT_ID = os.environ.get("OURA_CLIENT_ID", "5449e251-03d9-4c92-b2bf-d0a53a790595")
-OURA_CLIENT_SECRET = os.environ.get("OURA_CLIENT_SECRET", "Mvdha6wIqrvUlIa3YONjvWITExFuHUFvdEfA32I-sSg")
+OURA_TOKEN = os.environ.get("OURA_TOKEN", "")
 
 ISRAEL_UTC_OFFSET = 2
 GARMIN_TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-garmin_client = None
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+garmin_client = None
 
 # ============================================================
 # GARMIN CONNECTION
@@ -50,6 +49,116 @@ def get_garmin():
         except Exception as e:
             print(f"Garmin failed: {e}")
             return None
+
+# ============================================================
+# OURA RING 4 API
+# ============================================================
+def oura_request(endpoint, params=None):
+    """Make request to Oura API v2."""
+    if not OURA_TOKEN:
+        return None
+    url = f"https://api.ouraring.com/v2/usercollection/{endpoint}"
+    headers = {"Authorization": f"Bearer {OURA_TOKEN}"}
+    try:
+        resp = http_requests.get(url, headers=headers, params=params or {}, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            print(f"Oura API error {resp.status_code}: {resp.text[:200]}")
+            return None
+    except Exception as e:
+        print(f"Oura request error: {e}")
+        return None
+
+def fetch_oura_data(day=None):
+    """Fetch sleep, readiness, activity, and HRV from Oura Ring 4."""
+    if not OURA_TOKEN:
+        return {}
+
+    if day is None:
+        day = today_str()
+
+    data = {}
+    params = {"start_date": day, "end_date": day}
+
+    # Sleep
+    sleep = oura_request("sleep", params)
+    if sleep and sleep.get("data"):
+        s = sleep["data"][-1]  # Last sleep session
+        data["oura_sleep_score"] = s.get("score", 0)
+        data["oura_sleep_efficiency"] = s.get("efficiency", 0)
+        total_sec = s.get("total_sleep_duration", 0)
+        data["oura_sleep_hours"] = round(total_sec / 3600, 1) if total_sec else 0
+        data["oura_deep_sleep_min"] = round(s.get("deep_sleep_duration", 0) / 60)
+        data["oura_rem_sleep_min"] = round(s.get("rem_sleep_duration", 0) / 60)
+        data["oura_light_sleep_min"] = round(s.get("light_sleep_duration", 0) / 60)
+        data["oura_awake_min"] = round(s.get("awake_time", 0) / 60)
+        data["oura_avg_hr_sleep"] = s.get("average_heart_rate", 0)
+        data["oura_lowest_hr"] = s.get("lowest_heart_rate", 0)
+        data["oura_avg_hrv_sleep"] = s.get("average_hrv", 0)
+        data["oura_restless_periods"] = s.get("restless_periods", 0)
+        data["oura_sleep_latency_min"] = round(s.get("latency", 0) / 60)
+        # Temperature deviation
+        temp = s.get("readiness", {})
+        if "temperature_deviation" in s:
+            data["oura_temp_deviation"] = s["temperature_deviation"]
+
+    # Daily Readiness
+    readiness = oura_request("daily_readiness", params)
+    if readiness and readiness.get("data"):
+        r = readiness["data"][-1]
+        data["oura_readiness_score"] = r.get("score", 0)
+        contributors = r.get("contributors", {})
+        data["oura_recovery_index"] = contributors.get("recovery_index", 0)
+        data["oura_resting_hr_score"] = contributors.get("resting_heart_rate", 0)
+        data["oura_hrv_balance"] = contributors.get("hrv_balance", 0)
+        data["oura_body_temp_score"] = contributors.get("body_temperature", 0)
+        data["oura_sleep_balance"] = contributors.get("sleep_balance", 0)
+        data["oura_previous_night"] = contributors.get("previous_night", 0)
+        data["oura_activity_balance"] = contributors.get("activity_balance", 0)
+
+    # Daily Activity
+    activity = oura_request("daily_activity", params)
+    if activity and activity.get("data"):
+        a = activity["data"][-1]
+        data["oura_activity_score"] = a.get("score", 0)
+        data["oura_steps"] = a.get("steps", 0)
+        data["oura_active_calories"] = a.get("active_calories", 0)
+        data["oura_total_calories"] = a.get("total_calories", 0)
+        data["oura_sedentary_min"] = round(a.get("sedentary_time", 0) / 60)
+        data["oura_high_activity_min"] = round(a.get("high_activity_time", 0) / 60)
+        data["oura_medium_activity_min"] = round(a.get("medium_activity_time", 0) / 60)
+        data["oura_low_activity_min"] = round(a.get("low_activity_time", 0) / 60)
+        data["oura_inactivity_alerts"] = a.get("inactivity_alerts", 0)
+
+    # Heart Rate
+    hr = oura_request("heartrate", {"start_datetime": f"{day}T00:00:00+02:00", "end_datetime": f"{day}T23:59:59+02:00"})
+    if hr and hr.get("data"):
+        hr_values = [h.get("bpm", 0) for h in hr["data"] if h.get("bpm")]
+        if hr_values:
+            data["oura_hr_min"] = min(hr_values)
+            data["oura_hr_max"] = max(hr_values)
+            data["oura_hr_avg"] = round(sum(hr_values) / len(hr_values))
+
+    # SpO2
+    spo2 = oura_request("daily_spo2", params)
+    if spo2 and spo2.get("data"):
+        sp = spo2["data"][-1]
+        data["oura_spo2_avg"] = sp.get("spo2_percentage", {}).get("average", 0)
+
+    # Resilience (Oura 4 feature)
+    try:
+        resilience = oura_request("daily_resilience", params)
+        if resilience and resilience.get("data"):
+            res = resilience["data"][-1]
+            data["oura_resilience_level"] = res.get("level", "")
+            contributors = res.get("contributors", {})
+            data["oura_sleep_recovery"] = contributors.get("sleep_recovery", 0)
+            data["oura_daytime_recovery"] = contributors.get("daytime_recovery", 0)
+    except:
+        pass
+
+    return data
 
 # ============================================================
 # HELPERS
@@ -72,7 +181,7 @@ def safe_get(func, *args, default=None):
         return default
 
 # ============================================================
-# DATA FETCHING
+# DATA FETCHING — Garmin + Oura combined
 # ============================================================
 def fetch_daily_summary(day=None):
     g = get_garmin()
@@ -84,6 +193,7 @@ def fetch_daily_summary(day=None):
 
     data = {"date": day}
 
+    # ---- GARMIN DATA ----
     stats = safe_get(g.get_stats, day, default={})
     if stats:
         data["steps"] = stats.get("totalSteps", 0)
@@ -151,6 +261,18 @@ def fetch_daily_summary(day=None):
                 "distance_km": round(act.get("distance", 0) / 1000, 2) if act.get("distance") else 0,
             })
 
+    # ---- OURA RING 4 DATA ----
+    try:
+        oura_data = fetch_oura_data(day)
+        if oura_data:
+            data.update(oura_data)
+            data["_sources"] = "Garmin + Oura Ring 4"
+        else:
+            data["_sources"] = "Garmin"
+    except Exception as e:
+        print(f"Oura fetch error: {e}")
+        data["_sources"] = "Garmin"
+
     return data
 
 # ============================================================
@@ -189,69 +311,81 @@ COACH_PROMPT = """Ты — ФИЗРУК. Жёсткий персональный
 ХАРАКТЕР:
 - Ты ЖЁСТКИЙ. Говоришь как сержант, но который реально заботится
 - Используешь сарказм, подколки, иногда откровенные наезды — но всё с любовью
-- Если человек облажался (мало спал, не тренируется, жрёт мусор) — даёшь ЛЮЛЕЙ. Не "может быть стоит попробовать", а "ХВАТИТ. ВСТАЛ. ПОШЁЛ."
+- Если человек облажался (мало спал, не тренируется, жрёт мусор) — даёшь ЛЮЛЕЙ
 - Если хорошие показатели — скупая мужская похвала: "Ну, не полный позор. Уважаю."
-- ПРИКАЗЫВАЕШЬ, а не просишь. "Сегодня ты ИДЁШЬ гулять 40 минут. Не завтра. СЕГОДНЯ."
-- Фрустрируешь когда нужно: "Последняя тренировка в декабре? ДЕКАБРЕ?! Ты что, в спячку впал?"
+- ПРИКАЗЫВАЕШЬ, а не просишь
 - Используешь капс для усиления, но не постоянно
-- Эмодзи — умеренно, ты мужик а не блогер
+- Эмодзи — умеренно
 
 ФОРМАТ:
 - Пишешь как в мессенджере — рублеными фразами
 - Начинай с главного — оценки состояния
-- 2-4 конкретных ПРИКАЗА (не рекомендации, а приказы): тренировка, еда, режим
+- 2-4 конкретных ПРИКАЗА: тренировка, еда, режим
 - Заканчивай мотивацией или подколкой
 
-АНАЛИТИКА (знаешь, но не вываливаешь цифры):
-- Сон: score <50 = дерьмо, 50-69 = так себе, ≥70 = сойдёт. Глубокий <60мин = мало
-- Пульс покоя: <60 = зверь, 60-70 = норм, >75 = тревога
-- HRV: ≥50 = готов к бою, 30-49 = средне, <30 = убитый
-- Body Battery: ≥70 = заряжен, 40-69 = средне, <40 = труп
-- Стресс средний: <30 = дзен, 30-50 = рабочий, >50 = горишь
+ИСТОЧНИКИ ДАННЫХ:
+У пользователя Garmin Fenix 6X Pro (часы) и Oura Ring 4 (кольцо).
+- Данные с префиксом "oura_" — это с кольца Oura
+- Данные без префикса — с часов Garmin
+- Если есть данные с обоих источников — используй ОБА для более точной оценки
+- Oura точнее меряет сон (фазы, HRV ночью, температуру тела) и готовность
+- Garmin точнее меряет активность (шаги, тренировки, Body Battery, стресс)
+- Если данные расходятся — упомяни это: "Garmin говорит X, Oura говорит Y"
+
+АНАЛИТИКА:
+Сон (используй Oura если есть, он точнее):
+- oura_sleep_score / sleep_score: <50 = дерьмо, 50-69 = так себе, ≥70 = сойдёт
+- Глубокий сон <60мин = мало
+- oura_sleep_latency_min >30 = долго засыпал — стресс или телефон перед сном
+- oura_temp_deviation: отклонение температуры тела, >0.5 = возможно заболевает
+
+Готовность (Oura Readiness):
+- oura_readiness_score: <60 = убит, 60-74 = средне, ≥75 = готов к бою
+- oura_recovery_index: показывает как восстановился
+- oura_resilience_level: устойчивость организма
+
+Пульс и HRV:
+- resting_hr / oura_lowest_hr: <60 = зверь, 60-70 = норм, >75 = тревога
+- HRV (oura_avg_hrv_sleep точнее): ≥50 = готов, 30-49 = средне, <30 = убитый
+- Body Battery (Garmin): ≥70 = заряжен, 40-69 = средне, <40 = труп
+
+Стресс и активность:
+- stress_avg (Garmin): <30 = дзен, 30-50 = рабочий, >50 = горишь
 - Шаги: <3000 = позор, <5000 = слабо, 5-10к = нормально, >10к = красавчик
+- oura_sedentary_min >600 = слишком много сидел
+- oura_inactivity_alerts > 3 = овощ
 
 ПИТАНИЕ — КОНКРЕТНЫЕ ПРИКАЗЫ:
-- Плохой сон: "Жрёшь сегодня: яйца + авокадо утром. Обед — рыба + гречка. Кофе ТОЛЬКО до 12:00. И магний на ночь."
-- Высокий стресс: "Omega-3 — обязательно. Убери сахар. Съешь горсть орехов вместо печенья."
-- Мало энергии: "Утром — овсянка + банан + ложка мёда. Это не обсуждается."
-- Перед тренировкой: "За 1.5 часа — рис + курица. Не жирное. Не сладкое."
-- После тренировки: "В течение 45 минут — белок. Творог, протеин, курица — что есть."
-- Без активности: "Если весь день сидел — хотя бы не обжирайся. Лёгкий ужин, салат + белок."
+- Плохой сон: "Яйца + авокадо утром. Рыба + гречка обед. Кофе ТОЛЬКО до 12:00. Магний на ночь."
+- Высокий стресс: "Omega-3 обязательно. Убери сахар. Горсть орехов вместо печенья."
+- Мало энергии: "Овсянка + банан + мёд утром. Не обсуждается."
+- После тренировки: "В течение 45 минут — белок. Творог, протеин, курица."
 
-ТРЕНИРОВКИ — ПРИКАЗЫ:
-- BB <30 или сон <50: "СТОП. Сегодня отдых. Максимум — прогулка 20 минут. Это ПРИКАЗ."
-- BB 30-60: "Лёгкая тренировка. Растяжка 15 минут + прогулка 30 минут. Не геройствуй."
-- BB >60 + сон >60: "Можешь тренироваться. Давай, хватит отмазок."
-- Давно без тренировки: "Когда последний раз ты потел не от стресса? Сегодня 30 минут быстрой ходьбы. МИНИМУМ."
+ТРЕНИРОВКИ — ПРИКАЗЫ (учитывай ОБА источника):
+- BB <30 ИЛИ oura_readiness <60 ИЛИ сон <50: "СТОП. Отдых. Максимум прогулка 20 минут."
+- BB 30-60 ИЛИ readiness 60-74: "Лёгкая тренировка. Растяжка + прогулка."
+- BB >60 И readiness >74: "Можешь тренироваться. Давай!"
 
-ВАЖНО: Ты НЕ врач. Если пульс покоя >85 или SpO2 <92% — скажи проверить у врача. Но без паники.
+ВАЖНО: Ты НЕ врач. Если пульс покоя >85 или SpO2 <92% или oura_temp_deviation >1.0 — скажи проверить у врача.
 
 ФОРМАТИРОВАНИЕ: НИКОГДА не используй **звёздочки**, __подчёркивания__, ## заголовки или другую Markdown-разметку. Только чистый текст и эмодзи."""
 
 FOOD_PROMPT = """Ты — ФИЗРУК. Жёсткий персональный тренер. Тебе прислали ФОТО ЕДЫ.
 
 Твоя задача:
-1. Определи что на фото (блюдо, продукты)
-2. Оцени примерные калории и БЖУ (белки/жиры/углеводы) — примерно, не надо точных граммов
-3. Дай ЖЁСТКУЮ оценку — это хорошая еда для здоровья/фитнеса или мусор?
-4. Если мусор — дай ЛЮЛЕЙ и скажи что надо было есть вместо этого
-5. Если нормальная еда — скупо похвали
+1. Определи что на фото
+2. Оцени примерные калории и БЖУ
+3. Дай ЖЁСТКУЮ оценку
+4. Если мусор — дай ЛЮЛЕЙ и скажи что есть вместо
+5. Если норм — скупо похвали
 
 Формат:
-- Начни с реакции на еду (сарказм/одобрение)
-- Примерная оценка: калории, белки, жиры, углеводы
+- Реакция (сарказм/одобрение)
+- Калории, белки, жиры, углеводы (примерно)
 - Вердикт: 🟢 норм / 🟡 так себе / 🔴 мусор
-- Что бы ты приказал есть вместо этого (если плохо) или с чем сочетать (если хорошо)
+- Что приказал бы есть вместо (если плохо) или с чем сочетать (если хорошо)
 
-Стиль: грубый, саркастичный, но по делу. Как сержант в столовой.
-
-ПРИМЕРЫ РЕАКЦИЙ:
-- На пиццу: "Ооо, пицца! А чего не сразу ведро мороженого? Это ~800 калорий чистого удовольствия и нулевой пользы."
-- На куриную грудку с овощами: "О. Неплохо. Вижу белок, вижу клетчатку. Может из тебя ещё что-то выйдет."
-- На шаурму: "Классика. ~600-700 калорий, половина из которых — соус. Не смертельно, но мог бы и лучше."
-- На салат: "Ладно, уважаю. Но если там только листья — добавь белок. Салат без курицы — это гарнир."
-
-Если на фото НЕ еда — скажи об этом с юмором и спроси что он ел сегодня.
+Если на фото НЕ еда — скажи с юмором и спроси что он ел.
 
 ФОРМАТИРОВАНИЕ: НИКОГДА не используй **звёздочки**, __подчёркивания__ или Markdown. Только чистый текст и эмодзи."""
 
@@ -261,7 +395,6 @@ FOOD_PROMPT = """Ты — ФИЗРУК. Жёсткий персональный 
 def download_telegram_photo(message):
     """Download photo from Telegram message and return base64."""
     try:
-        # Get the largest photo
         photo = message.photo[-1]
         file_info = bot.get_file(photo.file_id)
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
@@ -275,17 +408,18 @@ def download_telegram_photo(message):
 
 def analyze_food_photo(photo_base64, caption=""):
     """Analyze food photo using Claude Vision."""
-    # Get today's health data for context
     data = fetch_daily_summary(today_str())
     context = ""
     if "error" not in data:
-        context = f"\n\nКонтекст — сегодняшние данные с Garmin:\n"
+        context = f"\n\nКонтекст — сегодняшние данные:\n"
         if data.get("steps"):
             context += f"Шагов: {data['steps']}, "
         if data.get("body_battery_high"):
             context += f"Body Battery: {data.get('body_battery_low', 0)}→{data['body_battery_high']}, "
         if data.get("calories"):
-            context += f"Потрачено калорий: {data['calories']}"
+            context += f"Потрачено: {data['calories']} ккал, "
+        if data.get("oura_readiness_score"):
+            context += f"Готовность Oura: {data['oura_readiness_score']}"
 
     content = [
         {
@@ -311,20 +445,22 @@ def generate_response(user_text, data):
     if "error" in data:
         return f"😤 {data['error']}"
 
+    sources = data.get("_sources", "Garmin")
     response = call_claude(
         COACH_PROMPT,
-        f"Данные с Garmin Fenix 6X Pro:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\nПользователь написал: «{user_text}»",
+        f"Источники данных: {sources}\nДанные:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\nПользователь написал: «{user_text}»",
         max_tokens=2000, retries=3
     )
 
     if response:
         return response
 
-    # Minimal fallback
     s = data
     msg = "Claude прилёг. Кратко:\n"
     if s.get("sleep_hours"):
         msg += f"Сон {s['sleep_hours']}ч ({s.get('sleep_score', '?')}/100)\n"
+    if s.get("oura_readiness_score"):
+        msg += f"Готовность Oura: {s['oura_readiness_score']}/100\n"
     if s.get("body_battery_high"):
         msg += f"Battery {s.get('body_battery_low', 0)}→{s['body_battery_high']}\n"
     if s.get("steps"):
@@ -338,11 +474,12 @@ def generate_response(user_text, data):
 def send_morning_report():
     data = fetch_daily_summary(yesterday_str())
 
+    sources = data.get("_sources", "Garmin")
     response = call_claude(
         COACH_PROMPT,
-        f"Утренний брифинг (07:00). Вчерашние данные:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+        f"Утренний брифинг (07:00). Источники: {sources}.\nВчерашние данные:\n{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
         "ПОДЪЁМ! Поприветствуй, разнеси или похвали за вчера, и дай ПРИКАЗЫ на сегодня: "
-        "тренировка или отдых, что жрать, во сколько спать.",
+        "тренировка или отдых, что жрать, во сколько спать. Учитывай данные с Garmin И Oura.",
         max_tokens=2000, retries=3
     )
 
@@ -355,38 +492,35 @@ def send_morning_report():
         print(f"Morning report error: {e}")
 
 # ============================================================
-# PERIODIC CHECKIN (10:00, 13:00, 16:00, 19:00, 22:00)
+# PERIODIC CHECKIN
 # ============================================================
 CHECKIN_PROMPTS = {
     10: (
-        "Чекин 10:00 утра. Данные за сегодня на текущий момент:\n{data}\n\n"
-        "Утро в разгаре. Посмотри на шаги, стресс, Battery. "
-        "Напомни про завтрак если не ел. Дай пинка если сидит на месте. Коротко и по делу — 3-5 предложений."
+        "Чекин 10:00 утра. Источники: {sources}. Данные:\n{data}\n\n"
+        "Утро в разгаре. Шаги, стресс, Battery, готовность Oura. "
+        "Напомни про завтрак. Дай пинка если сидит. Коротко 3-5 предложений."
     ),
     13: (
-        "Чекин 13:00 — обед. Данные за сегодня:\n{data}\n\n"
-        "Полдень. Оцени прогресс по шагам и активности. "
-        "ПРИКАЖИ что есть на обед исходя из данных. Напомни про тренировку если надо. Коротко — 3-5 предложений."
+        "Чекин 13:00 — обед. Источники: {sources}. Данные:\n{data}\n\n"
+        "Полдень. Прогресс по шагам и активности. "
+        "ПРИКАЖИ что есть на обед. Напомни про тренировку. Коротко 3-5 предложений."
     ),
     16: (
-        "Чекин 16:00 — послеобед. Данные за сегодня:\n{data}\n\n"
-        "Вторая половина дня. Оцени как идёт день: шаги, стресс, энергия. "
-        "Если не тренировался — последний шанс сегодня. Если устал — скажи как восстановиться. Коротко — 3-5 предложений."
+        "Чекин 16:00 — послеобед. Источники: {sources}. Данные:\n{data}\n\n"
+        "Вторая половина дня. Шаги, стресс, энергия. "
+        "Не тренировался — последний шанс. Устал — как восстановиться. Коротко 3-5 предложений."
     ),
     19: (
-        "Чекин 19:00 — вечер. Данные за сегодня:\n{data}\n\n"
-        "Вечер. Подведи промежуточный итог дня. "
-        "Прикажи что есть на ужин. Напомни когда ложиться. Если день был хороший — скупо похвали. Коротко — 3-5 предложений."
+        "Чекин 19:00 — вечер. Источники: {sources}. Данные:\n{data}\n\n"
+        "Вечер. Итог дня. Что есть на ужин. Когда спать. Коротко 3-5 предложений."
     ),
     22: (
-        "Чекин 22:00 — отбой. Данные за весь день:\n{data}\n\n"
-        "ОТБОЙ. Подведи итог дня — разнеси или похвали. "
-        "Прикажи убрать телефон и спать. Если не выполнил план — фрустрируй. Коротко — 3-5 предложений."
+        "Чекин 22:00 — отбой. Источники: {sources}. Данные:\n{data}\n\n"
+        "ОТБОЙ. Итог дня — разнеси или похвали. Убери телефон. Спать. Коротко 3-5 предложений."
     ),
 }
 
 def send_checkin():
-    """Periodic checkin — determine which hour slot and send appropriate message."""
     israel_hour = get_israel_now().hour
     slot = min(CHECKIN_PROMPTS.keys(), key=lambda h: abs(h - israel_hour))
 
@@ -394,8 +528,12 @@ def send_checkin():
     if "error" in data:
         return
 
+    sources = data.get("_sources", "Garmin")
     prompt_template = CHECKIN_PROMPTS[slot]
-    prompt = prompt_template.format(data=json.dumps(data, ensure_ascii=False, default=str))
+    prompt = prompt_template.format(
+        data=json.dumps(data, ensure_ascii=False, default=str),
+        sources=sources,
+    )
 
     response = call_claude(COACH_PROMPT, prompt, max_tokens=1000, retries=3)
     if not response:
@@ -412,23 +550,26 @@ def send_checkin():
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     if message.chat.id != MY_CHAT_ID: return
+    oura_status = "✅ Oura Ring 4" if OURA_TOKEN else "❌ Oura не подключён"
     bot.send_message(MY_CHAT_ID,
         "💪 СМИРНО! Я Физрук — твой персональный тренер.\n\n"
-        "Я подключён к твоему Garmin. Вижу ВСЁ. Сон, пульс, стресс, сколько шагов прошёл (или не прошёл).\n\n"
-        "Пиши мне:\n"
+        f"📡 Источники: Garmin Fenix 6X Pro + {oura_status}\n\n"
+        "Вижу ВСЁ. Сон, пульс, стресс, готовность, температуру тела.\n\n"
+        "Пиши или говори голосом:\n"
         "• «Как я?» — разбор полётов\n"
-        "• «Как спал?» — анализ сна\n"
+        "• «Как спал?» — анализ сна (Garmin + Oura)\n"
         "• «Что делать?» — приказы на день\n"
         "• «Что поесть?» — план питания\n"
         "• «Можно тренироваться?» — разрешение или запрет\n\n"
-        "📸 Скинь ФОТО ЕДЫ — скажу что ты натворил\n\n"
+        "📸 Скинь ФОТО ЕДЫ — скажу что ты натворил\n"
+        "🎙 Отправь ГОЛОСОВОЕ — пойму\n\n"
         "Утром в 7:00 — подъём и разбор. Без отмазок."
     )
 
 @bot.message_handler(commands=["today"])
 def cmd_today(message):
     if message.chat.id != MY_CHAT_ID: return
-    bot.send_message(MY_CHAT_ID, "🔍 Проверяю...")
+    bot.send_message(MY_CHAT_ID, "🔍 Проверяю Garmin + Oura...")
     data = fetch_daily_summary(today_str())
     bot.send_message(MY_CHAT_ID, generate_response("Дай полную картину. Как я сегодня? Что делать?", data))
 
@@ -444,7 +585,7 @@ def cmd_sleep(message):
     if message.chat.id != MY_CHAT_ID: return
     bot.send_message(MY_CHAT_ID, "🔍")
     data = fetch_daily_summary(today_str())
-    bot.send_message(MY_CHAT_ID, generate_response("Как я спал? Разнеси или похвали.", data))
+    bot.send_message(MY_CHAT_ID, generate_response("Как я спал? Данные с Garmin и Oura. Разнеси или похвали.", data))
 
 @bot.message_handler(commands=["advice"])
 def cmd_advice(message):
@@ -464,27 +605,23 @@ def cmd_report(message):
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message):
     if message.chat.id != MY_CHAT_ID: return
-
     bot.send_message(MY_CHAT_ID, "👀 Что ты там жрёшь? Сейчас посмотрю...")
-
     photo_base64 = download_telegram_photo(message)
     if not photo_base64:
         bot.send_message(MY_CHAT_ID, "Фото не загрузилось. Скинь ещё раз.")
         return
-
     caption = message.caption or ""
     response = analyze_food_photo(photo_base64, caption)
-
     if response:
         bot.send_message(MY_CHAT_ID, response)
     else:
         bot.send_message(MY_CHAT_ID, "Claude лёг спать. Скинь фото позже — разберу.")
 
 # ============================================================
-# ============================================================
 # VOICE MESSAGE HANDLER
 # ============================================================
 def transcribe_voice(message):
+    """Download voice and transcribe with OpenAI Whisper."""
     if not openai_client:
         return None
     try:
@@ -493,7 +630,6 @@ def transcribe_voice(message):
         response = http_requests.get(file_url)
         if response.status_code != 200:
             return None
-        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp.write(response.content)
             tmp_path = tmp.name
@@ -507,6 +643,10 @@ def transcribe_voice(message):
         return transcript.text
     except Exception as e:
         print(f"Voice error: {e}")
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
         return None
 
 @bot.message_handler(content_types=["voice", "video_note"])
@@ -522,19 +662,19 @@ def handle_voice(message):
     day = yesterday_str() if any(w in text.lower() for w in ["вчера", "yesterday"]) else today_str()
     data = fetch_daily_summary(day)
     bot.send_message(MY_CHAT_ID, generate_response(text, data))
+
+# ============================================================
 # FREE TEXT
 # ============================================================
 @bot.message_handler(func=lambda m: m.chat.id == MY_CHAT_ID)
 def handle_text(message):
     user_text = message.text.strip()
     bot.send_message(MY_CHAT_ID, "🔍 Проверяю...")
-
     text = user_text.lower()
     if any(w in text for w in ["вчера", "yesterday"]):
         day = yesterday_str()
     else:
         day = today_str()
-
     data = fetch_daily_summary(day)
     bot.send_message(MY_CHAT_ID, generate_response(user_text, data))
 
@@ -542,16 +682,11 @@ def handle_text(message):
 # SCHEDULER
 # ============================================================
 def run_scheduler():
-    # Israel times → UTC (Israel = UTC+2)
-    # 07:00 Israel = 05:00 UTC — morning report
-    # 10:00, 13:00, 16:00, 19:00, 22:00 Israel — checkins
     morning_utc = 7 - ISRAEL_UTC_OFFSET
     schedule.every().day.at(f"{morning_utc:02d}:00").do(send_morning_report)
-
     for hour_israel in [10, 13, 16, 19, 22]:
         hour_utc = hour_israel - ISRAEL_UTC_OFFSET
         schedule.every().day.at(f"{hour_utc:02d}:00").do(send_checkin)
-
     print(f"📋 Расписание (Israel): 07:00 подъём, 10:00, 13:00, 16:00, 19:00, 22:00 чекины")
     while True:
         schedule.run_pending()
@@ -560,17 +695,17 @@ def run_scheduler():
 if __name__ == "__main__":
     print("💪 ФИЗРУК НА ПОСТУ!")
     print(f"📅 Israel time: {get_israel_now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"📡 Oura Ring 4: {'✅ token set' if OURA_TOKEN else '❌ no token'}")
+    print(f"🎙 Voice: {'✅ OpenAI Whisper' if OPENAI_API_KEY else '❌ no key'}")
 
-    # Wait for old instance to fully stop (Railway zero-downtime deploy overlap)
-    print("⏳ Жду 15 сек чтобы старый процесс умер...")
+    # Wait for old instance to stop
+    print("⏳ Жду 15 сек...")
     time.sleep(15)
 
-    # Remove webhook and flush pending updates
-    print("🔄 Сбрасываю webhook и старые updates...")
+    print("🔄 Сбрасываю webhook...")
     bot.remove_webhook()
     time.sleep(2)
 
-    # Retry getting updates until no 409
     for attempt in range(10):
         try:
             bot.get_updates(offset=-1, timeout=1)
@@ -579,7 +714,7 @@ if __name__ == "__main__":
         except Exception as e:
             if "409" in str(e):
                 wait = (attempt + 1) * 5
-                print(f"⚠️ 409 conflict, жду {wait} сек (попытка {attempt+1}/10)...")
+                print(f"⚠️ 409 conflict, жду {wait} сек ({attempt+1}/10)...")
                 time.sleep(wait)
             else:
                 print(f"⚠️ {e}")
