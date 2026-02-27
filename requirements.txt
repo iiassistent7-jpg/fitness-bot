@@ -4,3 +4,4 @@ pyTelegramBotAPI==4.14.0
 schedule==1.2.2
 garminconnect>=0.2.25
 garth>=0.4.0
+openai
