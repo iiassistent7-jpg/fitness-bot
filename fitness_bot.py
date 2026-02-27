@@ -9,6 +9,7 @@ import telebot
 import anthropic
 import requests as http_requests
 from garminconnect import Garmin
+from openai import OpenAI
 
 # ============================================================
 # CONFIGURATION
@@ -17,6 +18,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8759040105:AAHrTnS1uC2D8XEwxt
 MY_CHAT_ID = int(os.environ.get("MY_CHAT_ID", "320613087"))
 GARMIN_EMAIL = os.environ.get("GARMIN_EMAIL", "mozgprav24@gmail.com")
 GARMIN_PASSWORD = os.environ.get("GARMIN_PASSWORD", "Miikedub77")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "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")
 
 OURA_CLIENT_ID = os.environ.get("OURA_CLIENT_ID", "5449e251-03d9-4c92-b2bf-d0a53a790595")
@@ -28,6 +30,7 @@ GARMIN_TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 garmin_client = None
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================================
 # GARMIN CONNECTION
@@ -478,6 +481,47 @@ def handle_photo(message):
         bot.send_message(MY_CHAT_ID, "Claude лёг спать. Скинь фото позже — разберу.")
 
 # ============================================================
+# ============================================================
+# VOICE MESSAGE HANDLER
+# ============================================================
+def transcribe_voice(message):
+    if not openai_client:
+        return None
+    try:
+        file_info = bot.get_file(message.voice.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+        response = http_requests.get(file_url)
+        if response.status_code != 200:
+            return None
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(response.content)
+            tmp_path = tmp.name
+        with open(tmp_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="ru",
+            )
+        os.unlink(tmp_path)
+        return transcript.text
+    except Exception as e:
+        print(f"Voice error: {e}")
+        return None
+
+@bot.message_handler(content_types=["voice", "video_note"])
+def handle_voice(message):
+    if message.chat.id != MY_CHAT_ID:
+        return
+    bot.send_message(MY_CHAT_ID, "🎙 Слушаю...")
+    text = transcribe_voice(message)
+    if not text:
+        bot.send_message(MY_CHAT_ID, "Не разобрал. Скажи ещё раз или напиши текстом.")
+        return
+    bot.send_message(MY_CHAT_ID, f"✅ Понял: «{text}»")
+    day = yesterday_str() if any(w in text.lower() for w in ["вчера", "yesterday"]) else today_str()
+    data = fetch_daily_summary(day)
+    bot.send_message(MY_CHAT_ID, generate_response(text, data))
 # FREE TEXT
 # ============================================================
 @bot.message_handler(func=lambda m: m.chat.id == MY_CHAT_ID)
