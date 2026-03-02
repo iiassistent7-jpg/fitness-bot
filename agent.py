@@ -87,17 +87,17 @@ def fetch_oura_data(day=None):
         s = sleep["data"][-1]  # Last sleep session
         data["oura_sleep_score"] = s.get("score", 0)
         data["oura_sleep_efficiency"] = s.get("efficiency", 0)
-        total_sec = s.get("total_sleep_duration", 0)
+        total_sec = s.get("total_sleep_duration") or 0
         data["oura_sleep_hours"] = round(total_sec / 3600, 1) if total_sec else 0
-        data["oura_deep_sleep_min"] = round(s.get("deep_sleep_duration", 0) / 60)
-        data["oura_rem_sleep_min"] = round(s.get("rem_sleep_duration", 0) / 60)
-        data["oura_light_sleep_min"] = round(s.get("light_sleep_duration", 0) / 60)
-        data["oura_awake_min"] = round(s.get("awake_time", 0) / 60)
-        data["oura_avg_hr_sleep"] = s.get("average_heart_rate", 0)
-        data["oura_lowest_hr"] = s.get("lowest_heart_rate", 0)
-        data["oura_avg_hrv_sleep"] = s.get("average_hrv", 0)
-        data["oura_restless_periods"] = s.get("restless_periods", 0)
-        data["oura_sleep_latency_min"] = round(s.get("latency", 0) / 60)
+        data["oura_deep_sleep_min"] = round((s.get("deep_sleep_duration") or 0) / 60)
+        data["oura_rem_sleep_min"] = round((s.get("rem_sleep_duration") or 0) / 60)
+        data["oura_light_sleep_min"] = round((s.get("light_sleep_duration") or 0) / 60)
+        data["oura_awake_min"] = round((s.get("awake_time") or 0) / 60)
+        data["oura_avg_hr_sleep"] = s.get("average_heart_rate") or 0
+        data["oura_lowest_hr"] = s.get("lowest_heart_rate") or 0
+        data["oura_avg_hrv_sleep"] = s.get("average_hrv") or 0
+        data["oura_restless_periods"] = s.get("restless_periods") or 0
+        data["oura_sleep_latency_min"] = round((s.get("latency") or 0) / 60)
         # Temperature deviation
         temp = s.get("readiness", {})
         if "temperature_deviation" in s:
@@ -217,19 +217,19 @@ def fetch_daily_summary(day=None):
     if sleep:
         ds = sleep.get("dailySleepDTO", {})
         if ds:
-            data["sleep_score"] = ds.get("sleepScores", {}).get("overall", {}).get("value", 0)
-            duration_sec = ds.get("sleepTimeSeconds", 0)
+            data["sleep_score"] = ds.get("sleepScores", {}).get("overall", {}).get("value", 0) or 0
+            duration_sec = ds.get("sleepTimeSeconds", 0) or 0
             data["sleep_hours"] = round(duration_sec / 3600, 1) if duration_sec else 0
-            data["deep_sleep_min"] = round(ds.get("deepSleepSeconds", 0) / 60)
-            data["light_sleep_min"] = round(ds.get("lightSleepSeconds", 0) / 60)
-            data["rem_sleep_min"] = round(ds.get("remSleepSeconds", 0) / 60)
-            data["awake_min"] = round(ds.get("awakeSleepSeconds", 0) / 60)
+            data["deep_sleep_min"] = round((ds.get("deepSleepSeconds") or 0) / 60)
+            data["light_sleep_min"] = round((ds.get("lightSleepSeconds") or 0) / 60)
+            data["rem_sleep_min"] = round((ds.get("remSleepSeconds") or 0) / 60)
+            data["awake_min"] = round((ds.get("awakeSleepSeconds") or 0) / 60)
 
     stress = safe_get(g.get_stress_data, day, default={})
     if stress:
-        data["high_stress_min"] = round(stress.get("highStressDuration", 0) / 60)
-        data["medium_stress_min"] = round(stress.get("mediumStressDuration", 0) / 60)
-        data["rest_stress_min"] = round(stress.get("restStressDuration", 0) / 60)
+        data["high_stress_min"] = round((stress.get("highStressDuration") or 0) / 60)
+        data["medium_stress_min"] = round((stress.get("mediumStressDuration") or 0) / 60)
+        data["rest_stress_min"] = round((stress.get("restStressDuration") or 0) / 60)
 
     spo2 = safe_get(g.get_spo2_data, day, default={})
     if spo2:
@@ -256,7 +256,7 @@ def fetch_daily_summary(day=None):
                 "name": act.get("activityName", "—"),
                 "type": act.get("activityType", {}).get("typeKey", ""),
                 "date": act.get("startTimeLocal", "")[:10],
-                "duration_min": round(act.get("duration", 0) / 60),
+                "duration_min": round((act.get("duration") or 0) / 60),
                 "avg_hr": act.get("averageHR", 0),
                 "distance_km": round(act.get("distance", 0) / 1000, 2) if act.get("distance") else 0,
             })
